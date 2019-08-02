@@ -1,0 +1,181 @@
+---
+title: "Deducting policy preferences through word embeddings"
+author: "Céline Van den Rul"
+date: "15th April 2019"
+output:
+  word_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+---
+
+# What word embeddings can reveal about a country's policy preferences
+
+In this exercise, I explore different word embeddings techniques to show what they can reveal about France and Germany's policy preferences in two key areas: climate change and the economy. To do this, I use the UNGD corpus and select all their speeches after 2000 to keep a close-enough time period. I look at two techniques: tf-idf and glove. 
+
+```{r, echo=FALSE}
+library(tidytext)
+library(readtext)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(text2vec)
+
+DATA_DIR <- "/Users/celinevdr/Downloads/Converted Sessions" 
+ungd_files <- readtext(paste0(DATA_DIR, "/*"), 
+                                 docvarsfrom = "filenames", 
+                                 dvsep="_", 
+                                 docvarnames = c("Country", "Session", "Year"))
+
+
+ungd_files$doc_id <- str_replace(ungd_files$doc_id , ".txt", "") %>%
+   str_replace(. , "_\\d{2}", "") 
+
+ungd <- subset(ungd_files, Year >= 2000)
+ungd <- subset(ungd, Country %in% c("FRA", "DEU"))
+
+glimpse(ungd)
+```
+
+# Sparse vectors: tf-idf
+
+TF-IDF or term frequency - inverse document frequency is a numerical statistic that is intended to detect how important a word or n-gram is to a document in a collection of corpus. It thus provides some weighting to a given word based on the context it occurs. Here, I rely on the commands from the tidytext package and visualize my results in the following frequency tables. Interestingly, the most important words in the German corpus are "germans", "cooperatives" and "structures" and contrast well with the important words from the French corpus ("tax", "mali", "africans"). 
+
+```{r, echo=FALSE}
+
+ungd_words <- ungd %>%
+  unnest_tokens(word, text) %>%
+  count(Country, word, sort=TRUE)
+
+total_words <- ungd_words %>%
+  group_by(Country) %>%
+  summarize(total=sum(n))
+
+ungd_words <- left_join(ungd_words, total_words)
+ungd_words$Country <- as.factor(ungd_words$Country)
+
+glimpse(ungd_words)
+
+ungd_words <- ungd_words %>% 
+  bind_tf_idf(word, Country, n)
+
+ungd_words <- ungd_words %>% 
+  arrange(desc(tf_idf))
+```
+
+
+```{r, echo=FALSE}
+ungd_words %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(word = factor(word, levels = rev(unique(word)))) %>% 
+  group_by(Country) %>% 
+  top_n(15) %>% 
+  ungroup() %>%
+  ggplot(aes(word, tf_idf, fill = Country)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~Country, ncol = 2, scales = "free") +
+  coord_flip()
+```
+
+# Dense vectors: GloVe
+GloVe embeddings leverage the same intuition behind the co-occuring matrix used distributional embeddings, but uses neural methods to decompose the co-occurence matrix into more expressive and dense word vectors. Here, I rely on the text2vec package. 
+
+```{r, echo=FALSE}
+prep_fun = function(x) {
+  x %>% 
+    # make text lower case
+    str_to_lower %>% 
+    # remove non-alphanumeric symbols
+    str_replace_all("[^[:alnum:]]", " ") %>% 
+    # collapse multiple spaces
+    str_replace_all("\\s+", " ")
+}
+
+ungd$text_clean = prep_fun(ungd$text)
+
+france = subset(ungd, Country %in% "FRA")
+germany = subset(ungd, Country %in% "DEU")
+
+it_france = itoken(france$text_clean, progressbar = FALSE)
+it_germany = itoken(germany$text_clean, progressbar = FALSE)
+
+# For France
+vocab_france = create_vocabulary(it_france)
+vocab_france = prune_vocabulary(vocab_france, term_count_min=5)
+
+# For Germany
+vocab_germany = create_vocabulary(it_germany)
+vocab_germany = prune_vocabulary(vocab_germany, term_count_min=5)
+
+
+```
+
+```{r, echo=FALSE, results=FALSE}
+# Vectorize
+vectorizer_france = vocab_vectorizer(vocab_france)
+vectorizer_germany = vocab_vectorizer(vocab_germany)
+
+vocab_tcm_france = create_tcm(it_france, vectorizer_france, skip_grams_window = 10)
+vocab_tcm_germany = create_tcm(it_germany, vectorizer_germany, skip_grams_window = 10)
+
+# Glove
+glove_france = GlobalVectors$new(word_vectors_size = 50, vocabulary = vocab_france, x_max = 10)
+doyle_wv_main_france = glove_france$fit_transform(vocab_tcm_france, n_iter = 100, convergence_tol = 0.00001)
+
+glove_germany = GlobalVectors$new(word_vectors_size = 50, vocabulary = vocab_germany, x_max = 10)
+doyle_wv_main_germany = glove_germany$fit_transform(vocab_tcm_germany, n_iter = 100, convergence_tol = 0.00001)
+
+doyle_wv_context_france = glove_france$components
+doyle_wv_context_germany = glove_germany$components
+
+doyle_word_vectors_france =  doyle_wv_main_france + t(doyle_wv_context_france)
+doyle_word_vectors_germany =  doyle_wv_main_germany + t(doyle_wv_context_germany)
+```
+
+To find out whether I can extract policy preferences from the neighbourhood of words used by Germany and France in their UN speeches, I use the cosine measure of similarity. 
+
+```{r, message=FALSE}
+climate = doyle_word_vectors_germany["climate", , drop=F]
+
+cos_sim_climate = sim2(x = doyle_word_vectors_germany, y = climate, method = "cosine", norm = "l2")
+head(sort(cos_sim_climate[,1], decreasing = T), 10)
+```
+
+When applied to the term "climate", Germany uses the word climate not suprisingly closely with "change" but also other words such as "economy", "terror" and "commission". Which might relate to the negaitve implications of climate change in more detail.
+
+
+```{r, message=FALSE}
+climate = doyle_word_vectors_france["climate", , drop=F]
+
+cos_sim_climate = sim2(x = doyle_word_vectors_france, y = climate, method = "cosine", norm = "l2")
+head(sort(cos_sim_climate[,1], decreasing = T), 10)
+```
+
+In contrast, France uses the term "climate" more closely with other terms such as "universal", "historic" and "agreement". This might relate to the more urgent need to come together and take action. 
+
+
+```{r, message=FALSE}
+economy = doyle_word_vectors_germany["economic", , drop=F]
+
+cos_sim_economy = sim2(x = doyle_word_vectors_germany, y = economy, method = "cosine", norm = "l2")
+head(sort(cos_sim_economy[,1], decreasing = T), 10)
+```
+
+When using the term "economic", Germany uses it most closely with terms such as "social", "growth", "crisis" and "development". Interestingly, the term "order" also comes up. 
+
+```{r, message=FALSE}
+economy = doyle_word_vectors_france["economic", , drop=F]
+
+cos_sim_economy = sim2(x = doyle_word_vectors_france, y = economy, method = "cosine", norm = "l2")
+head(sort(cos_sim_economy[,1], decreasing = T), 10)
+```
+
+Usage of the term "economic" by the French is quite similar to Germany with a sense of "cooperation", "social" and "assistance". In contrast to the German term "order", the French terms "freedom" and "open" come up, which can also point to a contrasting opinion towards economic policy. 
+
+As we can see, we can thus deduct a lot of interesting results from just analysing word embeddings in France and Germany's UN speeches and in what they can tell us about their policy preferences. 
+
+
+
+
+
