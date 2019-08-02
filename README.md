@@ -1,0 +1,2 @@
+# Deducting-policy-preferences-through-word-embeddings
+In this exercise, I explore different word embeddings techniques to show what they can reveal about France and Germany's policy preferences in two key areas: climate change and the economy. To do this, I use the UNGD corpus and select all their speeches after 2000 to keep a close-enough time period. I look at two techniques: tf-idf and glove. 
